@@ -535,13 +535,19 @@ public static class AssetManager
                     // happens when they changed the name when patching it
 
                     // since we load patch superbundles first the first one should be correct most of the time, hopefully not too many issues arise bc of this
-                    FrostyLogger.Logger?.LogWarning($"Removing ebx \"{entry.Name}\" with same guid as \"{other.Name}\"");
+                    FrostyLogger.Logger?.LogDebug($"Removing ebx \"{entry.Name}\" with same guid as \"{other.Name}\"");
 
                     s_ebxNameMapping.Remove(entry.Name);
                 }
                 else
                 {
                     s_ebxGuidMapping.Add(entry.Guid, entry);
+
+                    if (TypeLibrary.IsSubClassOf(entry.Type, "TypeInfoAsset"))
+                    {
+                        EbxAsset asset = reader.ReadAsset<EbxAsset>();
+                        TypeLibrary.AddTypeInfoAsset(asset.RootInstanceGuid, asset.RootObject);
+                    }
                 }
             }
 
@@ -585,7 +591,7 @@ public static class AssetManager
                 entry.LogicalSize = (uint)entry.OriginalSize;
             }
         }
-        FrostyLogger.Logger?.LogInformation($"Had to resolve OriginalSize for {a} chunks");
+        FrostyLogger.Logger?.LogDebug($"Had to resolve OriginalSize for {a} chunks");
     }
 
     private static bool ReadCache(out List<EbxAssetEntry> prePatchEbx, out List<ResAssetEntry> prePatchRes, out List<ChunkAssetEntry> prePatchChunks)
@@ -731,6 +737,8 @@ public static class AssetManager
                     s_chunkGuidMapping.Add(entry.Id, entry);
                 }
             }
+
+            TypeLibrary.ReadCache(stream);
         }
 
         return !isPatched;
@@ -822,6 +830,8 @@ public static class AssetManager
                     stream.WriteInt32(bundleId);
                 }
             }
+
+            TypeLibrary.WriteCache(stream);
         }
     }
 

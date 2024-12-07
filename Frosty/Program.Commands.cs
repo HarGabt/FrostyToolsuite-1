@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using Frosty.Sdk;
+using Frosty.Sdk.Attributes;
 using Frosty.Sdk.Ebx;
 using Frosty.Sdk.IO;
 using Frosty.Sdk.Managers;
@@ -41,7 +42,7 @@ internal static partial class Program
 			return value;
 		});
 		Option<int> pid = new("--pid", () => -1, "The process id of the running game, needed if a type sdk needs to be generated from the game");
-		Command load = new("load", "Loads a Frostbite game") { gamePath, pid };
+		Command load = new("load", "Loads a Frostbite game") { gamePath, s_initFsKey, s_bundleKey, s_casKey, pid };
 		load.AddAlias("l");
 		load.SetHandler((a, b) =>
 		{
@@ -79,17 +80,16 @@ internal static partial class Program
             {
                 if (!Enum.IsDefined(entry.ResType))
                 {
-                    if (resolved.Contains((uint)entry.ResType))
+                    if (!resolved.Add((uint)entry.ResType))
                     {
-                        continue;
-                    }
-                    if (!types.ContainsKey((uint)entry.ResType))
-                    {
-                        FrostyLogger.Logger?.LogError("Could not resolve ResType: {}", (uint)entry.ResType);
                         continue;
                     }
 
-                    resolved.Add((uint)entry.ResType);
+                    if (!types.ContainsKey((uint)entry.ResType))
+                    {
+                        FrostyLogger.Logger?.LogError("Could not resolve ResType: {} ({})", (uint)entry.ResType, entry.Name);
+                        continue;
+                    }
 
                     List<string> v = types[(uint)entry.ResType];
                     if (v.Count > 1)
@@ -109,6 +109,49 @@ internal static partial class Program
             Console.Write(sb.ToString());
         });
         inRoot.AddCommand(resTypes);
+
+        Command info = new("info") { IsHidden = true };
+        info.AddAlias("i");
+
+        Argument<string> name = new("name", "The name of the ebx to export, can include wildcards '?' and '*'");
+        Command res = new("res") { name };
+        res.SetHandler(inName =>
+        {
+            ResAssetEntry? entry = AssetManager.GetResAssetEntry(inName);
+            if (entry is null)
+            {
+                FrostyLogger.Logger?.LogError("Res with the name: \"{}\" does not exist", inName);
+                return;
+            }
+            Console.WriteLine($"ResType: {entry.ResType}");
+            char[] meta = new char[entry.ResMeta.Length * 2];
+            for (int i = 0; i < entry.ResMeta.Length; i++)
+            {
+                string hex = entry.ResMeta[i].ToString("X2");
+                meta[i * 2] = hex[0];
+                meta[i * 2 + 1] = hex[1];
+            }
+            Console.WriteLine($"ResMeta: {new string(meta)}");
+            Console.WriteLine($"ResRid: {entry.ResRid}");
+        }, name);
+        info.AddCommand(res);
+        inRoot.AddCommand(info);
+
+        Command usedTypes = new("used-types") { IsHidden = true };
+        res = new("res");
+        res.SetHandler(() =>
+        {
+            HashSet<uint> used = new();
+            foreach (ResAssetEntry entry in AssetManager.EnumerateResAssetEntries())
+            {
+                if (used.Add((uint)entry.ResType))
+                {
+                    Console.WriteLine(entry.ResType);
+                }
+            }
+        });
+        usedTypes.AddCommand(res);
+        inRoot.AddCommand(usedTypes);
     }
 
 	private static void AddExportCommand(RootCommand inRoot)
@@ -116,18 +159,27 @@ internal static partial class Program
 		Command export = new("export");
 		export.AddAlias("e");
 
-        Argument<string> name = new("name", "The name of the ebx to export, can include wildcards '?' and '*'");
-        Option<bool> convert = new("--convert",
-            "Convert the ebx to a readable format (dbx) and if possible to a common format for e.g. textures, meshes, sounds, etc. ");
-        Option<bool> preserveStructure = new("--preserve-structure", "Preserves the folder structure of the ebx");
-		Option<string> type = new("--type", "The allowed types of the ebx to export");
+        Argument<string> name = new("name", "The name of the asset to export, can include wildcards '?' and '*'");
+        Option<bool> preserveStructure = new("--preserve-structure", "Preserves the folder structure of the asset");
+		Option<string> type = new("--type", "The allowed types of the asset to export");
         Option<string> output = new("--output", () => string.Empty, "The folder in which the ebx will be exported");
 		output.AddAlias("-o");
 
+        Option<bool> convert = new("--convert",
+            "Convert the ebx to a readable format (dbx) and if possible to a common format for e.g. textures, meshes, sounds, etc. ");
         Command ebx = new("ebx") { name, convert, preserveStructure, type, output };
 		ebx.SetHandler(HandleEbxExport, name, convert, preserveStructure, type, output);
-
         export.AddCommand(ebx);
+
+        Option<bool> resMeta = new("--res-meta", "Inserts the ResMeta at the start of the data");
+        Command res = new("res") { name, resMeta, preserveStructure, type, output };
+        res.SetHandler(HandleResExport, name, resMeta, preserveStructure, type, output);
+        export.AddCommand(res);
+
+        Command chunk = new("chunk") { name, output };
+        chunk.SetHandler(HandleChunkExport, name, output);
+        export.AddCommand(chunk);
+
 		inRoot.AddCommand(export);
 	}
 
@@ -146,6 +198,10 @@ internal static partial class Program
         Command res = new("res") { name, type };
         res.SetHandler(HandleResSearch, name, type);
         search.AddCommand(res);
+
+        Command chunk = new("chunk") { name };
+        chunk.SetHandler(HandleChunkSearch, name);
+        search.AddCommand(chunk);
 
 		inRoot.AddCommand(search);
 	}
@@ -174,24 +230,34 @@ internal static partial class Program
         }
     }
 
+    private static void HandleChunkSearch(string inName)
+    {
+        string pattern = "^" + Regex.Escape(inName).Replace("\\?", ".").Replace("\\*", ".*") + "$";
+        foreach (ChunkAssetEntry item in AssetManager.EnumerateChunkAssetEntries())
+        {
+            if (Regex.IsMatch(item.Name, pattern))
+            {
+                Console.WriteLine(item.Name);
+            }
+        }
+    }
+
 	private static void HandleEbxExport(string inName, bool inConvert, bool inPreserveStructure, string? inType, string inOutput)
 	{
-		EbxAssetEntry? ebxAssetEntry = AssetManager.GetEbxAssetEntry(inName);
-		if (ebxAssetEntry is null)
+		EbxAssetEntry? entry = AssetManager.GetEbxAssetEntry(inName);
+		if (entry is null)
 		{
 			string pattern = "^" + Regex.Escape(inName).Replace("\\?", ".").Replace("\\*", ".*") + "$";
-			{
-				foreach (EbxAssetEntry item in AssetManager.EnumerateEbxAssetEntries())
-				{
-					if (Regex.IsMatch(item.Name, pattern) && (string.IsNullOrEmpty(inType) || TypeLibrary.IsSubClassOf(item.Type, inType)))
-					{
-						ExportEbx(item, inConvert, Path.Combine(inOutput, inPreserveStructure ? item.Name : item.Filename));
-					}
-				}
-				return;
-			}
+			foreach (EbxAssetEntry item in AssetManager.EnumerateEbxAssetEntries())
+            {
+                if (Regex.IsMatch(item.Name, pattern) && (string.IsNullOrEmpty(inType) || TypeLibrary.IsSubClassOf(item.Type, inType)))
+                {
+                    ExportEbx(item, inConvert, Path.Combine(inOutput, inPreserveStructure ? item.Name : item.Filename));
+                }
+            }
+            return;
 		}
-		ExportEbx(ebxAssetEntry, inConvert, Path.Combine(inOutput, inPreserveStructure ? ebxAssetEntry.Name : ebxAssetEntry.Filename));
+		ExportEbx(entry, inConvert, Path.Combine(inOutput, inPreserveStructure ? entry.Name : entry.Filename));
 	}
 
 	private static void ExportEbx(EbxAssetEntry inEntry, bool inConvert, string inPath)
@@ -201,16 +267,12 @@ internal static partial class Program
 		if (inConvert)
 		{
 			EbxAsset asset = AssetManager.GetEbxAsset(inEntry);
-            // TODO: create plugin system
-			if (TypeLibrary.IsSubClassOf(inEntry.Type, "TextureAsset"))
-			{
-				Texture texture = AssetManager.GetResAs<Texture>(AssetManager.GetResAssetEntry(asset.RootObject.GetProperty<ResourceRef>("Resource"))!);
-				texture.SaveDds(inPath + ".dds");
-			}
-			else if (TypeLibrary.IsSubClassOf(inEntry.Type, "MeshAsset"))
-			{
-				//MeshExporter.Export(ebxAsset, inPath + ".glb");
-			}
+
+            if (PluginManager.EbxExportDelegates.TryGetValue(inEntry.Type, out ExportEbxDelegate? export))
+            {
+                export(asset, inPath);
+            }
+
 			using DbxWriter dbxWriter = new(fileInfo.FullName + ".dbx");
 			dbxWriter.Write(asset);
 			return;
@@ -218,6 +280,74 @@ internal static partial class Program
 		using Block<byte> block = AssetManager.GetAsset(inEntry);
 		File.WriteAllBytes(fileInfo.FullName + ".ebx", block.ToArray());
 	}
+
+    private static void HandleResExport(string inName, bool inResMeta, bool inPreserveStructure, string? inType, string inOutput)
+    {
+        ResAssetEntry? entry = AssetManager.GetResAssetEntry(inName);
+        if (entry is null)
+        {
+            string pattern = "^" + Regex.Escape(inName).Replace("\\?", ".").Replace("\\*", ".*") + "$";
+            foreach (ResAssetEntry item in AssetManager.EnumerateResAssetEntries())
+            {
+                if (Regex.IsMatch(item.Name, pattern) && (string.IsNullOrEmpty(inType) || item.ResType.ToString() == inType))
+                {
+                    ExportRes(item, inResMeta, Path.Combine(inOutput, inPreserveStructure ? item.Name : item.Filename));
+                }
+            }
+            return;
+        }
+        ExportRes(entry, inResMeta, Path.Combine(inOutput, inPreserveStructure ? entry.Name : entry.Filename));
+    }
+
+    private static void ExportRes(ResAssetEntry inEntry, bool inResMeta, string inPath)
+    {
+        FileInfo fileInfo = new(inPath);
+        fileInfo.Directory?.Create();
+
+        using Block<byte> block = AssetManager.GetAsset(inEntry);
+        if (inResMeta)
+        {
+            using FileStream fileStream = File.Create(fileInfo.FullName + "." + inEntry.ResType);
+
+            fileStream.Write(inEntry.ResMeta);
+            fileStream.Write(block);
+
+            return;
+        }
+        File.WriteAllBytes(fileInfo.FullName + "." + inEntry.ResType, block.ToArray());
+    }
+
+    private static void HandleChunkExport(string inName, string inOutput)
+    {
+        if (Guid.TryParse(inName, out Guid id))
+        {
+            ChunkAssetEntry? entry = AssetManager.GetChunkAssetEntry(id);
+            if (entry is null)
+            {
+                FrostyLogger.Logger?.LogError("No chunk with id {} exists", id);
+                return;
+            }
+            ExportChunk(entry, Path.Combine(inOutput, entry.Name));
+        }
+
+        string pattern = "^" + Regex.Escape(inName).Replace("\\?", ".").Replace("\\*", ".*") + "$";
+        foreach (ChunkAssetEntry item in AssetManager.EnumerateChunkAssetEntries())
+        {
+            if (Regex.IsMatch(item.Name, pattern))
+            {
+                ExportChunk(item, Path.Combine(inOutput, item.Name));
+            }
+        }
+    }
+
+    private static void ExportChunk(ChunkAssetEntry inEntry, string inPath)
+    {
+        FileInfo fileInfo = new(inPath);
+        fileInfo.Directory?.Create();
+
+        using Block<byte> block = AssetManager.GetAsset(inEntry);
+        File.WriteAllBytes(fileInfo.FullName + ".chunk", block.ToArray());
+    }
 
 	private static void HandleQuit()
 	{
