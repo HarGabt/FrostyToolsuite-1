@@ -28,11 +28,11 @@ public sealed class DbxReader
     // the loaded dbx file
     private readonly XmlDocument m_xml = new();
     // key - instance guid, value - instance and its xml representation
-    private readonly Dictionary<Guid, (object ebxInstance, XmlNode dbxInstance)> m_guidToObjAndXmlNode = new();
+    private readonly Dictionary<Guid, (IEbxInstance ebxInstance, XmlNode dbxInstance)> m_guidToObjAndXmlNode = new();
     // used to keep track of number of refs pointing to an instance
     private readonly Dictionary<Guid, int> m_guidToRefCount = new();
 
-    private EbxAsset? m_ebx;
+    private EbxPartition? m_ebx;
     private Guid m_primaryInstGuid;
     // incremented when an internal id is requested
     private int m_internalId = -1;
@@ -53,9 +53,9 @@ public sealed class DbxReader
         m_guidToRefCount.Clear();
     }
 
-    public EbxAsset ReadAsset()
+    public EbxPartition ReadAsset()
     {
-        m_ebx = new EbxAsset();
+        m_ebx = new EbxPartition();
 #if FROSTY_DEVELOPER
         Stopwatch w = new();
         w.Start();
@@ -244,10 +244,10 @@ public sealed class DbxReader
         m_guidToRefCount.Add(instGuid, 0);
     }
 
-    private void ParseInstance(XmlNode node, object obj, Guid instGuid)
+    private void ParseInstance(XmlNode node, IEbxInstance obj, Guid instGuid)
     {
         ReadInstanceFields(node, obj, obj.GetType());
-        m_ebx!.AddObject(obj, instGuid == m_primaryInstGuid);
+        m_ebx!.AddObject(obj);
     }
 
     private PointerRef ParseRef(XmlNode node, string refGuid)
@@ -345,12 +345,11 @@ public sealed class DbxReader
             {
                 BoxedValueRef boxed;
 
-                XmlNode? child = node.FirstChild;
-                if (child is not null)
+                string? typeName = GetAttributeValue(node, "typeName");
+                if (typeName is not null)
                 {
-                    object value;
+                    object? value;
 
-                    string typeName = GetAttributeValue(node, "typeName")!;
                     IType? valueType = typeName == "PointerRef" ? new SdkType(typeof(PointerRef)) : TypeLibrary.GetType(typeName);
                     if (valueType is not SdkType)
                     {
@@ -362,20 +361,25 @@ public sealed class DbxReader
                     {
                         value = ParseRef(node, refGuid);
                     }
-                    else
+                    else if (node.FirstChild is not null)
                     {
-                        switch (child.Name)
+                        switch (node.FirstChild.Name)
                         {
                             case "complex":
-                                value = ReadStruct(arrayElementType, child);
+                                value = ReadStruct(arrayElementType, node.FirstChild);
                                 break;
                             case "array":
-                                value = ReadArray(child);
+                                value = ReadArray(node.FirstChild);
                                 break;
                             default:
                                 value = GetValueFromString(valueType.Type, node.InnerText, valueType.GetFlags().GetTypeEnum());
                                 break;
                         }
+                    }
+                    else
+                    {
+                        // this should not happen
+                        value = null;
                     }
 
                     boxed = new BoxedValueRef(value, valueType.GetFlags());
